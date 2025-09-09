@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Intent RPG — MVP</title>
+  <style>
+    :root{
+      --bg1:#0b0f17; --bg2:#0a0e19; --card:#0f1627; --muted:#9aa4bf; --text:#e7e9f4; --grid:#1d2744;
+      --accent:#7c3aed; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --radius:14px; --b:#1b2340;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font:15px/1.55 ui-sans-serif,system-ui,Segoe UI,Roboto; color:var(--text); background:linear-gradient(180deg,var(--bg1),var(--bg2));}
+    .wrap{max-width:1120px; margin:18px auto; padding:12px}
+    .grid{display:grid; grid-template-columns: 680px 1fr; gap:14px}
+    @media (max-width:1080px){ .grid{grid-template-columns:1fr} }
+    .card{background:var(--card); border:1px solid var(--b); border-radius:var(--radius);}
+    .head{padding:10px 12px; border-bottom:1px solid var(--b); color:var(--muted)}
+    .body{padding:12px}
+    canvas{display:block; background:#0e1324; border:1px solid var(--b); border-radius:12px}
+    .row{display:flex; gap:8px; flex-wrap:wrap}
+    button{background:#121a2c; color:var(--text); border:1px solid #283359; border-radius:10px; padding:9px 12px; cursor:pointer}
+    button:hover{border-color:#3a4a80}
+    button.primary{background:var(--accent); border-color:#5b21b6}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #26305a;background:#0f1528;color:#c7cff5;font-size:12px}
+    .stat{display:flex;justify-content:space-between;margin:6px 0;color:var(--muted)}
+    .log{height:220px; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; background:#0e1324; color:#c7d2fe; border:1px solid #1e2850; border-radius:10px; padding:10px}
+    .small{font-size:12px;color:var(--muted)}
+    .bad{color:var(--bad)} .ok{color:var(--ok)} .warn{color:var(--warn)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <div class="head">Canvas Dunia</div>
+        <div class="body">
+          <canvas id="view" width="640" height="400"></canvas>
+          <div class="small" style="margin-top:8px">
+            <b>Intent RPG:</b> Kamu <em>mengantri</em> aksi (Intent) ⇒ tekan <b>Resolve Tick</b>. Solver mengeksekusi semua intent dgn prioritas: <b>Defend</b> &gt; <b>Interact/Use</b> &gt; <b>Move</b> &gt; <b>Attack</b>. Energi <b>3</b> tiap tick.
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="head">Kontrol & Status</div>
+        <div class="body">
+          <div class="stat"><span>Tick</span><span id="tick">0</span></div>
+          <div class="stat"><span>HP Kamu</span><span id="hpP">—</span></div>
+          <div class="stat"><span>Energi Kamu</span><span id="enP">—</span></div>
+          <div class="stat"><span>Potions</span><span id="pots">0</span></div>
+          <div class="stat"><span>Musuh hidup</span><span id="aliveE">—</span></div>
+          <div style="margin:8px 0"><span class="pill" id="queued">Queued: 0</span></div>
+
+          <div class="row" style="margin:8px 0">
+            <button onclick="UI.queueMove(0,-1)">Move ↑</button>
+            <button onclick="UI.queueMove(0,1)">Move ↓</button>
+            <button onclick="UI.queueMove(-1,0)">Move ←</button>
+            <button onclick="UI.queueMove(1,0)">Move →</button>
+            <button onclick="UI.queueDefend()">Defend</button>
+            <button onclick="UI.queueAttack()">Attack</button>
+            <button onclick="UI.queueUse()">Use Potion</button>
+            <button onclick="UI.queueInteract()">Interact</button>
+          </div>
+          <div class="row">
+            <button class="primary" onclick="UI.resolveTick()">Resolve Tick</button>
+            <button onclick="UI.reset()">Reset</button>
+          </div>
+
+          <div style="margin-top:10px" class="small">Shortcut: WASD=Move, Q=Defend, E=Attack, R=Use, F=Interact, Enter=Resolve</div>
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script type="module">
+/***********************
+ *   Util & RNG
+ **********************/
+class RNG{ constructor(seed=123456){ this.s=seed>>>0 } next(){ let x=this.s; x^=x<<13; x^=x>>>17; x^=x<<5; this.s=x>>>0; return this.s/0xffffffff } int(n){ return Math.floor(this.next()*n) } pick(a){ return a[this.int(a.length)] } }
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/***********************
+ *  Tiles & Map
+ **********************/
+const T_FLOOR=0, T_WALL=1, T_CHEST=2, T_EXIT=3;
+const CELL=40, COLS=16, ROWS=10; // 640x400
+
+function makeMap(){
+  // Simple room with walls, one chest, one exit
+  const g=Array.from({length:ROWS},()=>Array(COLS).fill(T_FLOOR));
+  for(let x=0;x<COLS;x++){ g[0][x]=T_WALL; g[ROWS-1][x]=T_WALL }
+  for(let y=0;y<ROWS;y++){ g[y][0]=T_WALL; g[y][COLS-1]=T_WALL }
+  // inner pillars
+  for(let y=3;y<ROWS-2;y+=3){ g[y][5]=T_WALL; g[y][10]=T_WALL }
+  g[2][12]=T_CHEST;  // chest
+  g[ROWS-2][COLS-2]=T_EXIT; // exit
+  return g;
+}
+
+/***********************
+ *  Actors
+ **********************/
+class Actor{
+  constructor(id,name,x,y,color){
+    this.id=id; this.name=name; this.x=x; this.y=y; this.color=color;
+    this.maxHp=100; this.hp=100; this.maxEnergy=3; this.energy=3; this.defending=false;
+    this.potions=0; this.alive=true;
+  }
+}
+
+class World{
+  constructor(){
+    this.map=makeMap();
+    this.occ=new Map(); // key "x,y" => actorId
+    this.actors=new Map();
+    this.tick=0; this.rng=new RNG(98765);
+  }
+  key(x,y){ return \`\${x},\${y}\` }
+  inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS }
+  tile(x,y){ return this.map[y][x] }
+  setTile(x,y,t){ this.map[y][x]=t }
+  add(a){ this.actors.set(a.id,a); this.occ.set(this.key(a.x,a.y),a.id) }
+  move(id,dx,dy){
+    const a=this.actors.get(id); if(!a||!a.alive) return false;
+    const nx=clamp(a.x+dx,0,COLS-1), ny=clamp(a.y+dy,0,ROWS-1);
+    if(!this.inBounds(nx,ny)) return false;
+    const t=this.tile(nx,ny); if(t===T_WALL) return false;
+    if(this.occ.has(this.key(nx,ny))) return false;
+    this.occ.delete(this.key(a.x,a.y)); a.x=nx; a.y=ny; this.occ.set(this.key(nx,ny),id);
+    return true;
+  }
+  dist(a,b){ return Math.abs(a.x-b.x)+Math.abs(a.y-b.y) }
+  actorAt(x,y){ const id=this.occ.get(this.key(x,y)); return id?this.actors.get(id):null }
+  enemiesAlive(){ let n=0; for(const a of this.actors.values()) if(a.id!=='P' && a.alive) n++; return n }
+}
+
+/***********************
+ *  Intents & Solver
+ **********************/
+const COST={ DEFEND:1, INTERACT:1, USE:1, MOVE:1, ATTACK:2 };
+const PRIORITY={ DEFEND:5, INTERACT:4, USE:3, MOVE:2, ATTACK:1 };
+
+class Intent{
+  constructor(type, actorId, data={}){
+    this.type=type; this.actorId=actorId; this.data=data;
+    this.cost=COST[type]||0; this.priority=PRIORITY[type]||0;
+  }
+}
+
+class Solver{
+  constructor(world,log){ this.w=world; this.q=[]; this.log=log }
+  push(i){ this.q.push(i) }
+  clear(){ this.q.length=0 }
+  resolve(){
+    // Reset states per tick
+    for(const a of this.w.actors.values()){ a.defending=false; a.energy=a.maxEnergy }
+
+    // Sort by priority desc; if tie => player first
+    this.q.sort((a,b)=> b.priority-a.priority || (a.actorId==='P'?-1:1));
+
+    for(const it of this.q){
+      const A=this.w.actors.get(it.actorId); if(!A||!A.alive) continue;
+      if(A.energy < it.cost){ this.log(\`⚠️ \${A.name} kurang energi untuk \${it.type}\`); continue }
+      const spent=()=>A.energy-=it.cost;
+
+      if(it.type==='DEFEND'){
+        A.defending=true; spent(); this.log(\`🛡️ \${A.name} DEFEND (50% resist 1 tick)\`);
+      }
+      else if(it.type==='MOVE'){
+        const {dx,dy}=it.data; if(this.w.move(A.id,dx,dy)){ spent(); this.log(\`🚶 \${A.name} MOVE (\${dx},\${dy})\`) }
+        else this.log(\`⛔ \${A.name} gagal MOVE\`);
+      }
+      else if(it.type==='ATTACK'){
+        const {targetId}=it.data; const T=this.w.actors.get(targetId);
+        if(!T||!T.alive){ this.log(\`❓ target hilang\`); continue }
+        if(this.w.dist(A,T)!==1){ this.log(\`❌ \${A.name} bukan di jarak melee\`); continue }
+        let dmg=20; if(T.defending) dmg=Math.floor(dmg*0.5);
+        T.hp=Math.max(0,T.hp-dmg); spent();
+        this.log(\`🗡️ \${A.name} ATTACK → \${T.name} (\${dmg}) [HP \${T.hp}]\`);
+        if(T.hp===0){ T.alive=false; this.w.occ.delete(this.w.key(T.x,T.y)); this.log(\`☠️ \${T.name} kalah\`) }
+      }
+      else if(it.type==='INTERACT'){
+        // Adjacent chest → open; On exit → win message
+        const dirs=[[1,0],[-1,0],[0,1],[0,-1]]; let acted=false;
+        for(const [dx,dy] of dirs){
+          const tx=A.x+dx, ty=A.y+dy; if(!this.w.inBounds(tx,ty)) continue;
+          const t=this.w.tile(tx,ty);
+          if(t===T_CHEST){ this.w.setTile(tx,ty,T_FLOOR); A.potions++; spent(); acted=true; this.log(\`💎 \${A.name} membuka CHEST → +1 Potion (total \${A.potions})\`); break }
+        }
+        if(!acted && this.w.tile(A.x,A.y)===T_EXIT){ spent(); acted=true; this.log(\`🚪 \${A.name} menyentuh EXIT!\`); }
+        if(!acted) this.log(\`… tidak ada yang bisa di-INTERACT\`);
+      }
+      else if(it.type==='USE'){
+        if(A.potions>0 && A.hp>0){ A.potions--; const heal=30; A.hp=Math.min(A.maxHp,A.hp+heal); spent(); this.log(\`🧪 \${A.name} minum Potion (+\${heal} HP → \${A.hp})\`) }
+        else this.log(\`🙅 Potion habis / tidak perlu\`);
+      }
+    }
+
+    this.w.tick++;
+    this.clear();
+  }
+}
+
+/***********************
+ *  Simple Enemy AI
+ **********************/
+function aiForEnemy(w,enemy,player){
+  if(!enemy.alive) return [];
+  // If adjacent → ATTACK
+  if(w.dist(enemy,player)===1) return [new Intent('ATTACK', enemy.id, { targetId: player.id })];
+  // 20% defend randomly
+  if(w.rng.int(5)===0) return [new Intent('DEFEND', enemy.id)];
+  // Move one step closer (greedy Manhattan)
+  const dx = player.x>enemy.x?1: (player.x<enemy.x?-1:0);
+  const dy = dx!==0 ? 0 : (player.y>enemy.y?1:(player.y<enemy.y?-1:0));
+  // if blocked, try perpendicular
+  let opts=[[dx,dy],[0,player.y>enemy.y?1:-1],[player.x>enemy.x?1:-1,0],[0,0]];
+  for(const [mx,my] of opts){ if(mx||my){ const nx=clamp(enemy.x+mx,0,COLS-1), ny=clamp(enemy.y+my,0,ROWS-1); if(w.tile(nx,ny)!==T_WALL && !w.occ.has(w.key(nx,ny))) return [new Intent('MOVE', enemy.id, {dx:mx,dy:my})] } }
+  return [];
+}
+
+/***********************
+ *  Render & UI
+ **********************/
+const UI={};
+(function(){
+  const cvs=document.getElementById('view'); const ctx=cvs.getContext('2d');
+  const elHP=document.getElementById('hpP');
+  const elEN=document.getElementById('enP');
+  const elPots=document.getElementById('pots');
+  const elTick=document.getElementById('tick');
+  const elAliveE=document.getElementById('aliveE');
+  const elQueued=document.getElementById('queued');
+  const logBox=document.getElementById('log');
+
+  let W, P, E1, E2, SOLVER;
+
+  function log(s){ logBox.innerHTML += s+"\n"; logBox.scrollTop=logBox.scrollHeight }
+
+  function reset(){
+    W=new World();
+    P=new Actor('P','Kamu',2,5,'#60a5fa');
+    E1=new Actor('G1','Goblin',12,5,'#f87171');
+    E2=new Actor('S1','Slime',8,7,'#34d399'); E2.maxHp=80; E2.hp=80;
+    W.add(P); W.add(E1); W.add(E2);
+    SOLVER=new Solver(W,log);
+    logBox.textContent='';
+    log('🎮 Mulai! Buka chest untuk potion, kalahkan musuh, lalu ke EXIT.');
+    draw(); updateHUD();
+  }
+
+  function draw(){
+    const CELL=40, COLS=16, ROWS=10;
+    ctx.clearRect(0,0,cvs.width,cvs.height);
+    // tiles
+    for(let y=0;y<ROWS;y++){
+      for(let x=0;x<COLS;x++){
+        const t=W.tile(x,y);
+        if(t===T_WALL){ ctx.fillStyle='#111827'; }
+        else if(t===T_FLOOR){ ctx.fillStyle='#0f172a'; }
+        else if(t===T_CHEST){ ctx.fillStyle='#0f172a'; }
+        else if(t===T_EXIT){ ctx.fillStyle='#0c1222'; }
+        ctx.fillRect(x*CELL,y*CELL,CELL,CELL);
+        // grid lines
+        ctx.strokeStyle='#1e2a4d'; ctx.lineWidth=1; ctx.strokeRect(x*CELL,y*CELL,CELL,CELL);
+        if(t===T_CHEST){
+          // chest icon
+          ctx.fillStyle='#f59e0b';
+          ctx.fillRect(x*CELL+10,y*CELL+16,20,12);
+          ctx.strokeStyle='#eab308'; ctx.strokeRect(x*CELL+10,y*CELL+16,20,12);
+          ctx.fillStyle='#a16207'; ctx.fillRect(x*CELL+10,y*CELL+12,20,6);
+        }
+        if(t===T_EXIT){
+          ctx.strokeStyle='#7c3aed'; ctx.lineWidth=2; ctx.strokeRect(x*CELL+6,y*CELL+6,CELL-12,CELL-12);
+        }
+      }
+    }
+    // actors
+    for(const a of W.actors.values()){
+      if(!a.alive) continue;
+      const cx=a.x*CELL+CELL/2, cy=a.y*CELL+CELL/2;
+      ctx.beginPath(); ctx.arc(cx,cy,12,0,Math.PI*2); ctx.fillStyle=a.color; ctx.fill();
+      if(a.defending){ ctx.beginPath(); ctx.arc(cx,cy,16,0,Math.PI*2); ctx.strokeStyle='#93c5fd'; ctx.lineWidth=2; ctx.stroke() }
+    }
+  }
+
+  function updateHUD(){
+    elHP.textContent=\`\${P.hp}/\${P.maxHp}\`;
+    elEN.textContent=\`\${P.energy}/\${P.maxEnergy}\`;
+    elPots.textContent=String(P.potions);
+    elTick.textContent=String(W.tick);
+    elAliveE.textContent=String(W.enemiesAlive());
+    elQueued.textContent=\`Queued: \${SOLVER.q.length}\`;
+  }
+
+  function nearestEnemy(){
+    let best=null, d=1e9; for(const a of W.actors.values()) if(a.id!=='P' && a.alive){ const dd=W.dist(P,a); if(dd<d){d=dd; best=a} } return best;
+  }
+
+  function resolveTick(){
+    // Push AI intents
+    for(const a of W.actors.values()) if(a.id!=='P' && a.alive){ const ai=aiForEnemy(W,a,P); for(const it of ai) SOLVER.push(it) }
+    SOLVER.resolve();
+    draw(); updateHUD();
+    // Win/Lose checks
+    if(!P.alive || P.hp<=0){ log('💀 Kamu kalah. Tekan Reset.'); }
+    else if(W.enemiesAlive()===0 && W.tile(P.x,P.y)===T_EXIT){ log('🏆 Menang! Semua musuh kalah & EXIT tercapai.'); }
+  }
+
+  // Expose UI API
+  UI.queueMove=(dx,dy)=>{ SOLVER.push(new Intent('MOVE','P',{dx,dy})); updateHUD() };
+  UI.queueAttack=()=>{
+    const t=nearestEnemy(); if(!t){ log('… tidak ada musuh.'); return }
+    SOLVER.push(new Intent('ATTACK','P',{targetId:t.id})); updateHUD();
+  };
+  UI.queueDefend=()=>{ SOLVER.push(new Intent('DEFEND','P')); updateHUD() };
+  UI.queueUse=()=>{ SOLVER.push(new Intent('USE','P')); updateHUD() };
+  UI.queueInteract=()=>{ SOLVER.push(new Intent('INTERACT','P')); updateHUD() };
+  UI.resolveTick=()=>{ resolveTick() };
+  UI.reset=()=>{ reset() };
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown',e=>{
+    if(['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if(e.key==='w' || e.key==='ArrowUp') UI.queueMove(0,-1);
+    else if(e.key==='s' || e.key==='ArrowDown') UI.queueMove(0,1);
+    else if(e.key==='a' || e.key==='ArrowLeft') UI.queueMove(-1,0);
+    else if(e.key==='d' || e.key==='ArrowRight') UI.queueMove(1,0);
+    else if(e.key==='q') UI.queueDefend();
+    else if(e.key==='e') UI.queueAttack();
+    else if(e.key==='r') UI.queueUse();
+    else if(e.key==='f') UI.queueInteract();
+    else if(e.key==='Enter') UI.resolveTick();
+    updateHUD();
+  });
+
+  reset();
+})();
+</script>
+</body>
+</html>
